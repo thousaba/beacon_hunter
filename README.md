@@ -242,10 +242,3 @@ fingerprinting, and connection-profile signals — defence in depth.
 > and preserve phase. Documented here because ruling it out is part of the analysis.
 
 ---
-
-## Lab environment
-
-- Windows 11 analysis host, Kali Linux Sliver C2 server (`192.168.56.102`)
-- VirtualBox host-only network (`192.168.56.0/24`)
-- Sliver HTTP/HTTPS beacons, varied `--seconds` / `--jitter`
-- Capture: `tcpdump -i <hostonly> host 192.168.56.102 and tcp port 443 -w out.pcap`
