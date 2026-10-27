@@ -5,24 +5,20 @@ import statistics
 from collections import defaultdict, Counter
 
 try:
-    from scapy.all import rdpcap, IP, IPv6, TCP, UDP
+    from scapy.all import rdpcap, IP, IPv6, TCP, UDP, DNS
 except ImportError:
     sys.exit("scapy not found: pip install scapy")
 
 
-# Scoring weights  (max per signal)
-W_TIMING = 35   # interval regularity            (behavioural, jitter-limited)
-W_SIZE   = 30   # modal control-packet recurrence (structural, beats padding)
-W_SMALL  = 15   # how small that modal poll is
-W_EVENTS = 20   # persistence: many check-ins
+W_TIMING = 35  
+W_SIZE   = 30   
+W_SMALL  = 15   
+W_EVENTS = 20   
 
 
 
-BULK_MSS = 1400     # payloads >= this are treated as bulk data segments, not
-                    # control packets (they are just TCP/MSS fragmentation).
-MIN_CTRL = 16       # payloads < this are TCP keepalives / tiny ACK framing,
-                    # never a real C2 poll. Excluding them stops gateways and
-                    # other infra from faking a modal recurrence on 6-byte ACKs.
+BULK_MSS = 1400    
+MIN_CTRL = 16       
 
 
 # Per-signal scoring
@@ -221,12 +217,112 @@ def payload_len(pkt):
     return 0
 
 
+DNS_QTYPES = {
+    1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX",
+    16: "TXT", 28: "AAAA", 33: "SRV",
+}
+
+DNS_RCODES = {
+    0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN",
+    4: "NOTIMP", 5: "REFUSED",
+}
+
+
+def dns_text(value):
+    if isinstance(value, bytes):
+        return value.decode("ascii", errors="replace").rstrip(".")
+    return str(value).rstrip(".")
+
+
+def valid_dns_qname(name):
+    if not name or len(name) > 253:
+        return False
+    labels = name.split(".")
+    return all(0 < len(label) <= 63 and
+               all(ch.isalnum() or ch in "-_" for ch in label)
+               for label in labels)
+
+
+def dns_answer_records(dns):
+    answers = []
+    rr = dns.an
+    for _ in range(int(dns.ancount or 0)):
+        if not hasattr(rr, "rrname"):
+            break
+        rdata = getattr(rr, "rdata", "")
+        answers.append({
+            "name": dns_text(rr.rrname),
+            "type": DNS_QTYPES.get(int(rr.type), str(rr.type)),
+            "value": dns_text(rdata) if isinstance(rdata, (bytes, str)) else str(rdata),
+            "ttl": int(rr.ttl),
+        })
+        rr = rr.payload
+    return answers
+
+
+def print_dns_report(records, limit):
+    if not records:
+        return
+
+    summaries = defaultdict(lambda: {
+        "queries": 0,
+        "names": Counter(),
+        "types": Counter(),
+        "rcodes": Counter(),
+        "answers": defaultdict(set),
+        "name_rcodes": defaultdict(Counter),
+        "latencies": [],
+        "unanswered": 0,
+    })
+    for record in records:
+        key = (record["client"], record["resolver"])
+        summary = summaries[key]
+        summary["queries"] += 1
+        summary["names"][record["qname"]] += 1
+        summary["types"][record["qtype"]] += 1
+        if record["rcode"] is None:
+            summary["unanswered"] += 1
+        else:
+            summary["rcodes"][record["rcode"]] += 1
+            summary["name_rcodes"][record["qname"]][record["rcode"]] += 1
+        if record["latency_ms"] is not None:
+            summary["latencies"].append(record["latency_ms"])
+        for answer in record["answers"]:
+            summary["answers"][record["qname"]].add((answer["value"], answer["ttl"]))
+
+    print("[*] DNS observations (context only; generic packet scoring still applies):\n")
+    for (client, resolver), summary in summaries.items():
+        types = ", ".join(f"{name}={count}" for name, count in summary["types"].most_common())
+        rcodes = ", ".join(f"{name}={count}" for name, count in summary["rcodes"].most_common()) or "none"
+        avg_latency = (statistics.mean(summary["latencies"])
+                       if summary["latencies"] else None)
+        latency_text = f"; mean RTT {avg_latency:.2f} ms" if avg_latency is not None else ""
+        print(f"  {client} -> {resolver}: {summary['queries']} queries, "
+              f"{len(summary['names'])} unique names; types {types}; "
+              f"responses {rcodes}; unanswered {summary['unanswered']}{latency_text}")
+        print(f"      {'qname':<42}{'type':<8}{'count':>7}  {'rcode':<10}answers (TTL)")
+        print(f"      {'-'*42}{'-'*8}{'-'*7}  {'-'*10}{'-'*28}")
+        names = summary["names"].most_common(limit)
+        for qname, count in names:
+            sample = next(r for r in records
+                          if r["client"] == client and r["resolver"] == resolver
+                          and r["qname"] == qname)
+            answers = sorted(summary["answers"].get(qname, set()))
+            answer_text = ", ".join(f"{value} ({ttl}s)" for value, ttl in answers[:3]) if answers else "-"
+            name_rcodes = summary["name_rcodes"].get(qname, Counter())
+            rcode_text = name_rcodes.most_common(1)[0][0] if name_rcodes else "no reply"
+            print(f"      {qname:<42}{sample['qtype']:<8}{count:>7}  {rcode_text:<10}{answer_text}")
+        if len(summary["names"]) > limit:
+            print(f"      ... {len(summary['names']) - limit} more names (raise --top to show more)")
+    print()
+
+
 # Main
 def main():
     ap = argparse.ArgumentParser(description="PCAP beacon hunter v2 (modal + auto-gap)")
     ap.add_argument("pcap", help="path to pcap / pcapng file")
     ap.add_argument("--syn-only", action="store_true",
-                    help="only count TCP SYN packets (disables size signals)")
+                    help="only count TCP SYN packets (no UDP or established TCP traffic)")
     ap.add_argument("--min-gap", type=float, default=None,
                     help="burst-merge threshold in seconds (default: auto knee detection)")
     ap.add_argument("--threshold", type=float, default=0.55,
@@ -241,51 +337,109 @@ def main():
     packets = rdpcap(args.pcap)
     print(f"[*] Total packets: {len(packets)}\n")
 
-    samples_by_dst = defaultdict(list)
-    dst_counter = Counter()
+    # Source ports are omitted because clients commonly choose a new
+    # ephemeral source port for each TCP connection.
+    samples_by_flow = defaultdict(list)
+    flow_counter = Counter()
+    dns_records = []
+    dns_pending = defaultdict(list)
 
     for pkt in packets:
         ip = get_ip_layer(pkt)
         if ip is None:
             continue
+
+        if pkt.haslayer(DNS) and (pkt.haslayer(TCP) or pkt.haslayer(UDP)):
+            dns = pkt[DNS]
+            if pkt.haslayer(TCP):
+                dns_proto = "TCP"
+                sport, dport = int(pkt[TCP].sport), int(pkt[TCP].dport)
+            else:
+                dns_proto = "UDP"
+                sport, dport = int(pkt[UDP].sport), int(pkt[UDP].dport)
+            dns_id = int(dns.id)
+
+            if int(dns.qr) == 0 and dns.qd is not None:
+                qname = dns_text(dns.qd.qname)
+                if valid_dns_qname(qname):
+                    qtype_num = int(dns.qd.qtype)
+                    record = {
+                        "client": ip.src,
+                        "resolver": ip.dst,
+                        "qname": qname,
+                        "qtype": DNS_QTYPES.get(qtype_num, str(qtype_num)),
+                        "ts": float(pkt.time),
+                        "rcode": None,
+                        "answers": [],
+                        "latency_ms": None,
+                    }
+                    dns_records.append(record)
+                    query_key = (dns_proto, ip.src, ip.dst, sport, dport, dns_id)
+                    dns_pending[query_key].append(record)
+            elif int(dns.qr) == 1:
+                response_key = (dns_proto, ip.dst, ip.src, dport, sport, dns_id)
+                waiting = dns_pending.get(response_key)
+                if waiting:
+                    record = waiting.pop(0)
+                    rcode_num = int(dns.rcode)
+                    record["rcode"] = DNS_RCODES.get(rcode_num, str(rcode_num))
+                    record["answers"] = dns_answer_records(dns)
+                    record["latency_ms"] = round((float(pkt.time) - record["ts"]) * 1000, 2)
+
         dst = ip.dst
 
         if not args.include_internal and not is_external(dst):
             continue
 
+        if pkt.haslayer(TCP):
+            proto = "TCP"
+            dst_port = int(pkt[TCP].dport)
+        elif pkt.haslayer(UDP):
+            proto = "UDP"
+            dst_port = int(pkt[UDP].dport)
+        else:
+            continue
+
         if args.syn_only:
-            if not pkt.haslayer(TCP):
+            if proto != "TCP":
                 continue
             if not (pkt[TCP].flags & 0x02) or (pkt[TCP].flags & 0x10):
                 continue
 
-        dst_counter[dst] += 1
-        samples_by_dst[dst].append((float(pkt.time), payload_len(pkt)))
+        flow = (ip.src, dst, proto, dst_port)
+        flow_counter[flow] += 1
+        samples_by_flow[flow].append((float(pkt.time), payload_len(pkt)))
 
-    if not dst_counter:
+    print_dns_report(dns_records, args.top)
+
+    if not flow_counter:
         print("[!] No candidates. Try --include-internal or check pcap direction.")
         return
 
     print(f"[*] {'External' if not args.include_internal else 'All'} "
-          f"destination candidates (by packet count):\n")
-    print(f"    {'IP':<24}{'packets':>8}")
-    print(f"    {'-'*24}{'-'*8}")
-    for ip, c in dst_counter.most_common(args.top):
-        print(f"    {ip:<24}{c:>8}{infra_hint(ip)}")
+          f"connection candidates (by packet count):\n")
+    print(f"    {'source -> destination (protocol/port)':<55}{'packets':>8}")
+    print(f"    {'-'*55}{'-'*8}")
+    for flow, c in flow_counter.most_common(args.top):
+        src, dst, proto, port = flow
+        label = f"{src} -> {dst} ({proto}/{port})"
+        print(f"    {label:<55}{c:>8}{infra_hint(dst)}")
     print()
 
     print("[*] Beacon analysis (v2 scoring):\n")
-    scored = []   # (ip, result, is_infra)
-    for ip, _ in dst_counter.most_common(args.top):
-        result = analyze_beacon(samples_by_dst[ip],
+    scored = []   # (flow, result, is_infra)
+    for flow, _ in flow_counter.most_common(args.top):
+        src, dst, proto, port = flow
+        label = f"{src} -> {dst} ({proto}/{port})"
+        result = analyze_beacon(samples_by_flow[flow],
                                 min_gap=args.min_gap,
                                 threshold=args.threshold)
         if result is None:
             continue
 
-        is_infra = bool(infra_hint(ip))
+        is_infra = bool(infra_hint(dst))
         flag = "  <<< BEACON SUSPECT" if result.get('is_beacon_suspect') else ""
-        print(f"  [{ip}]{infra_hint(ip)}{flag}")
+        print(f"  [{label}]{infra_hint(dst)}{flag}")
         for k, v in result.items():
             if k == 'breakdown':
                 parts = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
@@ -295,7 +449,7 @@ def main():
         print()
 
         if result.get('is_beacon_suspect'):
-            scored.append((ip, result, is_infra))
+            scored.append((flow, result, is_infra))
 
     # shadow resolution
     # An infra (gateway/broadcast) hit that shares a non-infra beacon's exact
@@ -306,20 +460,22 @@ def main():
         rel = abs(a['mean_interval'] - b['mean_interval']) / b['mean_interval']
         return rel < 0.10 and abs(a['events'] - b['events']) <= 2
 
-    primary = [(ip, r) for ip, r, inf in scored if not inf]
+    primary = [(flow, r) for flow, r, inf in scored if not inf]
     beacons, shadows = [], []
-    for ip, r, inf in scored:
-        owner = next((pip for pip, pr in primary if same_cadence(r, pr)), None)
+    for flow, r, inf in scored:
+        owner = next((pflow for pflow, pr in primary if same_cadence(r, pr)), None)
         if inf and owner:
-            shadows.append((ip, owner))
+            shadows.append((flow, owner))
         else:
-            beacons.append((ip, r))
+            beacons.append((flow, r))
 
     print("=" * 56)
     if beacons:
         print(f"[+] {len(beacons)} beacon candidate(s) found:")
-        for ip, r in beacons:
-            print(f"    {ip}  ->  ~{r['mean_interval']}s, jitter {r['jitter_pct']}%, "
+        for flow, r in beacons:
+            src, dst, proto, port = flow
+            label = f"{src} -> {dst} ({proto}/{port})"
+            print(f"    {label}  ->  ~{r['mean_interval']}s, jitter {r['jitter_pct']}%, "
                   f"modal {r['modal_pkt_size']}B x{r['modal_recurrence']}, "
                   f"{r['events']} check-ins, score {r['score_pct']}%")
     else:
@@ -329,8 +485,12 @@ def main():
     if shadows:
         print()
         print("[i] Routing shadows (same cadence as a beacon above, not independent):")
-        for ip, owner in shadows:
-            print(f"    {ip}  -> reflection of {owner}")
+        for flow, owner in shadows:
+            src, dst, proto, port = flow
+            label = f"{src} -> {dst} ({proto}/{port})"
+            osrc, odst, oproto, oport = owner
+            owner_label = f"{osrc} -> {odst} ({oproto}/{oport})"
+            print(f"    {label}  -> reflection of {owner_label}")
 
 
 if __name__ == "__main__":

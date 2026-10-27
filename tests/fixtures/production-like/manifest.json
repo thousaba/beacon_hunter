@@ -1,0 +1,429 @@
+{
+  "title": "Beacon Hunter production-like synthetic PCAP suite",
+  "generated_by": "tests/pcap_suite/generate.py",
+  "seed": 20251027,
+  "synthetic_only": true,
+  "note": "No real malware, live traffic, or real user data is included. Ground truth describes generated behavior, not maliciousness.",
+  "captures": [
+    {
+      "file": "01_beacon_regular_tcp.pcap",
+      "packets": 84,
+      "ground_truth_beacon_present": true,
+      "description": "Low-jitter repeated HTTP check-ins over new TCP connections.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0
+        ],
+        "size_mode": "fixed",
+        "request_or_datagram_sizes": [
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112
+        ],
+        "seed": 20251027
+      }
+    },
+    {
+      "file": "02_beacon_additive_jitter_tcp.pcap",
+      "packets": 98,
+      "ground_truth_beacon_present": true,
+      "description": "Positive additive jitter; fixed-size request shape.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          15.895,
+          23.89,
+          21.079,
+          18.444,
+          22.731,
+          12.16,
+          13.65,
+          16.405,
+          22.669,
+          17.628,
+          22.463,
+          14.496,
+          16.055,
+          16.755
+        ],
+        "size_mode": "fixed",
+        "request_or_datagram_sizes": [
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112
+        ],
+        "seed": 20251028
+      }
+    },
+    {
+      "file": "03_beacon_high_jitter_tcp.pcap",
+      "packets": 112,
+      "ground_truth_beacon_present": true,
+      "description": "High interval jitter with a recurring request size.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          30.648,
+          29.378,
+          16.229,
+          40.514,
+          34.472,
+          31.118,
+          29.097,
+          22.714,
+          13.968,
+          21.197,
+          30.702,
+          37.127,
+          33.724,
+          24.398,
+          18.088,
+          30.911
+        ],
+        "size_mode": "fixed",
+        "request_or_datagram_sizes": [
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112
+        ],
+        "seed": 20251029
+      }
+    },
+    {
+      "file": "04_beacon_variable_size_tcp.pcap",
+      "packets": 98,
+      "ground_truth_beacon_present": true,
+      "description": "Moderate timing variation and changing request sizes.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          28.788,
+          27.386,
+          20.052,
+          24.236,
+          24.774,
+          23.686,
+          23.339,
+          21.842,
+          27.861,
+          28.336,
+          23.937,
+          22.185,
+          27.069,
+          24.994
+        ],
+        "size_mode": "variable",
+        "request_or_datagram_sizes": [
+          509,
+          226,
+          210,
+          250,
+          547,
+          396,
+          153,
+          305,
+          542,
+          165,
+          142,
+          374,
+          391,
+          373
+        ],
+        "seed": 20251030
+      }
+    },
+    {
+      "file": "05_beacon_growing_interval_size_tcp.pcap",
+      "packets": 91,
+      "ground_truth_beacon_present": true,
+      "description": "Intervals and request padding grow across check-ins.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          8.0,
+          9.8,
+          11.6,
+          13.4,
+          15.2,
+          17.0,
+          18.8,
+          20.6,
+          22.4,
+          24.2,
+          26.0,
+          27.8,
+          29.6
+        ],
+        "size_mode": "growing",
+        "request_or_datagram_sizes": [
+          149,
+          219,
+          289,
+          359,
+          429,
+          499,
+          569,
+          639,
+          709,
+          779,
+          849,
+          919,
+          989
+        ],
+        "seed": 20251031
+      }
+    },
+    {
+      "file": "06_beacon_sparse_tcp.pcap",
+      "packets": 56,
+      "ground_truth_beacon_present": true,
+      "description": "Long, regular intervals with a short event count.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          180.0,
+          180.0,
+          180.0,
+          180.0,
+          180.0,
+          180.0,
+          180.0,
+          180.0
+        ],
+        "size_mode": "fixed",
+        "request_or_datagram_sizes": [
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112,
+          112
+        ],
+        "seed": 20251032
+      }
+    },
+    {
+      "file": "07_beacon_jittered_udp.pcap",
+      "packets": 14,
+      "ground_truth_beacon_present": true,
+      "description": "UDP datagrams with jitter and varying payload lengths.",
+      "parameters": {
+        "transport": "udp",
+        "intervals_seconds": [
+          18.237,
+          17.164,
+          25.711,
+          12.448,
+          23.019,
+          13.379,
+          20.108,
+          20.358,
+          16.915,
+          14.873,
+          12.156,
+          21.802,
+          14.043,
+          23.825
+        ],
+        "size_mode": "variable",
+        "request_or_datagram_sizes": [
+          137,
+          393,
+          146,
+          653,
+          317,
+          264,
+          264,
+          354,
+          293,
+          440,
+          647,
+          455,
+          619,
+          447
+        ],
+        "seed": 20251033
+      }
+    },
+    {
+      "file": "08_beacon_variable_payload_control_tcp.pcap",
+      "packets": 196,
+      "ground_truth_beacon_present": true,
+      "description": "Variable application exchanges plus a recurring small request.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          43.105,
+          27.004,
+          34.994,
+          28.494,
+          36.309,
+          39.867,
+          29.084,
+          43.624,
+          32.049,
+          29.871,
+          44.327,
+          27.668,
+          32.717,
+          40.624
+        ],
+        "size_mode": "variable_with_control",
+        "request_or_datagram_sizes": [
+          309,
+          241,
+          430,
+          344,
+          485,
+          245,
+          618,
+          527,
+          620,
+          308,
+          570,
+          290,
+          569,
+          511
+        ],
+        "seed": 20251034
+      }
+    },
+    {
+      "file": "13_short_capture_tcp.pcap",
+      "packets": 21,
+      "ground_truth_beacon_present": true,
+      "description": "Only three check-ins; tests minimum-observation behavior.",
+      "parameters": {
+        "transport": "tcp",
+        "intervals_seconds": [
+          30.0,
+          30.0,
+          30.0
+        ],
+        "size_mode": "fixed",
+        "request_or_datagram_sizes": [
+          112,
+          112,
+          112
+        ],
+        "seed": 20251035
+      }
+    },
+    {
+      "file": "09_benign_bursty_http.pcap",
+      "packets": 224,
+      "ground_truth_beacon_present": false,
+      "description": "Bursty HTTP-like browsing with variable timing and payload sizes.",
+      "parameters": {
+        "requests": 32,
+        "timing": "clustered and irregular",
+        "seed": 20251047
+      }
+    },
+    {
+      "file": "10_benign_periodic_update.pcap",
+      "packets": 70,
+      "ground_truth_beacon_present": false,
+      "description": "Benign periodic update traffic; intentionally resembles a beacon.",
+      "parameters": {
+        "requests": 10,
+        "interval_seconds": 300,
+        "seed": 20251048
+      }
+    },
+    {
+      "file": "11_benign_bursty_dns.pcap",
+      "packets": 64,
+      "ground_truth_beacon_present": false,
+      "description": "Valid DNS A queries and responses in irregular bursts.",
+      "parameters": {
+        "queries": 32,
+        "qname_family": "host-NN.example.test",
+        "seed": 20251049
+      }
+    },
+    {
+      "file": "12_same_service_contamination.pcap",
+      "packets": 210,
+      "ground_truth_beacon_present": true,
+      "description": "Beacon and browser-like HTTP sessions share source, destination, TCP and port.",
+      "parameters": {
+        "beacon_intervals_seconds": [
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60,
+          60
+        ],
+        "background_requests": 18,
+        "seed": 20251050
+      }
+    },
+    {
+      "file": "14_mixed_background.pcap",
+      "packets": 342,
+      "ground_truth_beacon_present": true,
+      "description": "Composite capture with beacon, bursty HTTP, and valid DNS traffic.",
+      "parameters": {
+        "beacon_events": 14,
+        "background_http_requests": 28,
+        "dns_queries": 24,
+        "seed": 20251051
+      }
+    }
+  ]
+}
