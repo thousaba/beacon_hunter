@@ -415,14 +415,106 @@
     },
     {
       "file": "14_mixed_background.pcap",
-      "packets": 342,
+      "packets": 344,
       "ground_truth_beacon_present": true,
-      "description": "Composite capture with beacon, bursty HTTP, and valid DNS traffic.",
+      "description": "Composite traffic with beacon, bursty HTTP, ordinary DNS, and a matching beacon hostname answer.",
       "parameters": {
         "beacon_events": 14,
         "background_http_requests": 28,
-        "dns_queries": 24,
+        "dns_queries": 25,
+        "beacon_dns_name": "beacon.example.test",
+        "beacon_dns_ttl_seconds": 600,
+        "beacon_http_host": true,
         "seed": 20251051
+      }
+    },
+    {
+      "file": "15_mixed_background_no_http_host.pcap",
+      "packets": 344,
+      "ground_truth_beacon_present": true,
+      "description": "Same composite DNS and timing as scenario 14, but beacon HTTP Host headers are removed.",
+      "parameters": {
+        "beacon_events": 14,
+        "background_http_requests": 28,
+        "dns_queries": 25,
+        "beacon_dns_name": "beacon.example.test",
+        "beacon_dns_ttl_seconds": 600,
+        "beacon_http_host": false,
+        "dns_matches_scenario": "14_mixed_background",
+        "seed": 20251051
+      }
+    },
+    {
+      "file": "16_tls_sni_matches_dns.pcap",
+      "packets": 11,
+      "ground_truth_beacon_present": false,
+      "description": "TLS SNI matches one of two DNS names resolved to the same IP.",
+      "parameters": {
+        "dns_names": [
+          "tls-match.example.test",
+          "tls-shared.example.test"
+        ],
+        "tls_sni": "tls-match.example.test",
+        "destination_ip": "93.184.216.34",
+        "seed": 20251052
+      }
+    },
+    {
+      "file": "17_tls_without_sni.pcap",
+      "packets": 11,
+      "ground_truth_beacon_present": false,
+      "description": "TLS ClientHello has no SNI while multiple DNS names share the destination IP.",
+      "parameters": {
+        "dns_names": [
+          "tls-one.example.test",
+          "tls-two.example.test"
+        ],
+        "tls_sni": null,
+        "destination_ip": "93.184.216.34",
+        "seed": 20251053
+      }
+    },
+    {
+      "file": "18_tls_sni_without_dns.pcap",
+      "packets": 7,
+      "ground_truth_beacon_present": false,
+      "description": "TLS SNI is visible but no DNS traffic for the client is present in the capture.",
+      "parameters": {
+        "dns_names": [],
+        "tls_sni": "sni-only.example.test",
+        "destination_ip": "93.184.216.34",
+        "seed": 20251054
+      }
+    },
+    {
+      "file": "19_tls_sni_conflicts_with_dns.pcap",
+      "packets": 9,
+      "ground_truth_beacon_present": false,
+      "description": "Observed TLS SNI differs from the only DNS name resolved to the destination IP.",
+      "parameters": {
+        "dns_names": [
+          "dns-name.example.test"
+        ],
+        "tls_sni": "different-sni.example.test",
+        "destination_ip": "93.184.216.34",
+        "seed": 20251055
+      }
+    },
+    {
+      "file": "20_dns_cname_chain_to_tls_sni.pcap",
+      "packets": 9,
+      "ground_truth_beacon_present": false,
+      "description": "CNAME-to-CNAME-to-A DNS answer is correlated with a matching TLS SNI using the shortest chain TTL.",
+      "parameters": {
+        "qname": "settings.example.test",
+        "cname_chain": [
+          "regional.example.test",
+          "edge.example.test"
+        ],
+        "final_ip": "93.184.216.34",
+        "effective_ttl_seconds": 5,
+        "tls_sni": "settings.example.test",
+        "seed": 20251056
       }
     }
   ]

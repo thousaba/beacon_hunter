@@ -1,0 +1,11 @@
+Hedef ve port: Aynı uzak sunucuyla ne kadar sık iletişim kuruluyor?
+
+TCP davranışı: Yeni bağlantılar mı açılıyor, TLS mi kullanılıyor, bağlantılar ne kadar sürüyor?
+
+DNS: Hangi alan adı çözülmüş, yanıt adresi sonraki bağlantının hedefi mi?
+
+TLS/HTTP bilgisi: Sertifika, SNI, HTTP başlıkları veya URL gibi metadata kayıtta görünüyorsa.
+
+Trafik miktarı ve yönü: İstek/yanıt boyutları, veri oranı, bağlantı başına paket sayısı.
+
+Bağlam: Hedef IP/alan adının itibarı, makinenin rolü, beklenen yazılımlar veya endpoint logları.

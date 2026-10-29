@@ -24,6 +24,23 @@ CLIENT_MAC = "02:00:00:00:10:25"
 SERVER_MAC = "02:00:00:00:00:01"
 
 
+def tls_client_hello(sni=None):
+    """Build a minimal TLS ClientHello record, optionally with an SNI extension."""
+    extensions = b""
+    if sni:
+        name = sni.encode("ascii")
+        server_name = b"\x00" + len(name).to_bytes(2, "big") + name
+        server_name_list = len(server_name).to_bytes(2, "big") + server_name
+        extensions = (b"\x00\x00" + len(server_name_list).to_bytes(2, "big")
+                      + server_name_list)
+
+    body = (b"\x03\x03" + bytes(range(32)) + b"\x00"
+            + b"\x00\x02\x13\x01" + b"\x01\x00"
+            + len(extensions).to_bytes(2, "big") + extensions)
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
+
+
 class Capture:
     def __init__(self, seed):
         self.rng = random.Random(seed)
@@ -47,7 +64,13 @@ class Capture:
         dst_mac = SERVER_MAC
 
         def frame(a, b, payload=None):
-            return Ether(src=a, dst=b) / IP(src=src, dst=dst)
+            # Keep the network layer in the same direction as Ethernet. Reply
+            # frames reverse both MAC and IP endpoints.
+            if a == src_mac and b == dst_mac:
+                ip_src, ip_dst = src, dst
+            else:
+                ip_src, ip_dst = dst, src
+            return Ether(src=a, dst=b) / IP(src=ip_src, dst=ip_dst)
 
         def tcp_packet(t, a, b, sport_, dport_, seq, ack, flags, payload=None):
             pkt = frame(a, b) / TCP(sport=sport_, dport=dport_, seq=seq,
@@ -71,13 +94,10 @@ class Capture:
                    sseq + 1 + len(response), cseq + 2 + len(request), "FA")
 
     def http_request(self, path, host, pad=0, user_agent="LabClient/1.0"):
-        headers = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}",
-            f"User-Agent: {user_agent}",
-            "Accept: */*",
-            "Connection: close",
-        ]
+        headers = [f"GET {path} HTTP/1.1"]
+        if host is not None:
+            headers.append(f"Host: {host}")
+        headers.extend([f"User-Agent: {user_agent}", "Accept: */*", "Connection: close"])
         if pad:
             headers.append("X-Lab-Padding: " + ("p" * pad))
         return ("\r\n".join(headers) + "\r\n\r\n").encode("ascii")
@@ -88,7 +108,8 @@ class Capture:
                 + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
                 + body)
 
-    def dns_exchange(self, offset, qname, src=CLIENT, resolver=DNS_RESOLVER):
+    def dns_exchange(self, offset, qname, src=CLIENT, resolver=DNS_RESOLVER,
+                     ttl=60, cname_chain=None):
         qid = self.next_dns_id & 0xffff
         self.next_dns_id += 1
         sport = self.next_port
@@ -97,11 +118,29 @@ class Capture:
                  / IP(src=src, dst=resolver)
                  / UDP(sport=sport, dport=53)
                  / DNS(id=qid, rd=1, qd=DNSQR(qname=qname, qtype="A")))
+        if cname_chain:
+            records = []
+            owner = qname
+            for target, cname_ttl in cname_chain:
+                records.append(DNSRR(rrname=owner, type="CNAME", ttl=cname_ttl,
+                                     rdata=target))
+                owner = target
+            records.append(DNSRR(rrname=owner, type="A", ttl=ttl,
+                                 rdata="93.184.216.34"))
+            answer_section = records[0]
+            for rr in records[1:]:
+                answer_section = answer_section / rr
+            answer_count = len(records)
+        else:
+            answer_section = DNSRR(rrname=qname, type="A", ttl=ttl,
+                                   rdata="93.184.216.34")
+            answer_count = 1
+
         answer = (Ether(src=SERVER_MAC, dst=CLIENT_MAC)
                   / IP(src=resolver, dst=src)
                   / UDP(sport=53, dport=sport)
                   / DNS(id=qid, qr=1, rd=1, ra=1, qd=DNSQR(qname=qname, qtype="A"),
-                        an=DNSRR(rrname=qname, type="A", ttl=60, rdata="93.184.216.34")))
+                        an=answer_section, ancount=answer_count))
         self.add(offset, query)
         self.add(offset + 0.035, answer)
 
@@ -128,7 +167,8 @@ class Capture:
         }
 
 
-def beacon_capture(name, intervals, size_mode="fixed", transport="tcp", seed=SEED):
+def beacon_capture(name, intervals, size_mode="fixed", transport="tcp", seed=SEED,
+                   include_http_host=True):
     cap = Capture(seed)
     t = 0.0
     sizes = []
@@ -146,7 +186,8 @@ def beacon_capture(name, intervals, size_mode="fixed", transport="tcp", seed=SEE
             raise ValueError(size_mode)
 
         if transport == "tcp":
-            req = cap.http_request("/api/poll", "beacon.example.test", pad=pad)
+            host = "beacon.example.test" if include_http_host else None
+            req = cap.http_request("/api/poll", host, pad=pad)
             sizes.append(len(req))
             cap.tcp_exchange(t, CLIENT, BEACON_HOST, 80, req,
                              cap.http_response(size=cap.rng.randint(20, 700)))
@@ -269,17 +310,76 @@ def build_suite():
 
     # Composite capture combines independent beacon, DNS, web, and a periodic
     # benign updater so candidate ranking is tested with simultaneous profiles.
-    cap, _ = beacon_capture("14_mixed_background", [21.0 + rng.uniform(0, 9)
-        for _ in range(14)], "fixed", "tcp", seed=SEED + 24)
-    add_bursty_http(cap, 7.0, WEB_HOST, count=28)
-    t = 4.0
-    for i in range(24):
-        t += rng.choice([0.4, 1.1, 3.0, 16.0, 44.0])
-        cap.dns_exchange(t, f"query-{i:02d}.example.test")
+    mixed_intervals = [21.0 + rng.uniform(0, 9) for _ in range(14)]
+    mixed_dns_gaps = [rng.choice([0.4, 1.1, 3.0, 16.0, 44.0]) for _ in range(24)]
+
+    def mixed_background(include_beacon_host):
+        cap, _ = beacon_capture("14_mixed_background", mixed_intervals,
+            "fixed", "tcp", seed=SEED + 24,
+            include_http_host=include_beacon_host)
+        add_bursty_http(cap, 7.0, WEB_HOST, count=28)
+        # Both variants retain the same matching DNS answer and query burst.
+        cap.dns_exchange(1.0, "beacon.example.test", ttl=600)
+        t = 4.0
+        for i, gap in enumerate(mixed_dns_gaps):
+            t += gap
+            cap.dns_exchange(t, f"query-{i:02d}.example.test")
+        return cap
+
+    cap = mixed_background(include_beacon_host=True)
     entries.append(cap.write("14_mixed_background", True,
-        "Composite capture with beacon, bursty HTTP, and valid DNS traffic.",
+        "Composite traffic with beacon, bursty HTTP, ordinary DNS, and a matching beacon hostname answer.",
         {"beacon_events": 14, "background_http_requests": 28,
-         "dns_queries": 24, "seed": SEED + 24}))
+         "dns_queries": 25, "beacon_dns_name": "beacon.example.test",
+         "beacon_dns_ttl_seconds": 600, "beacon_http_host": True,
+         "seed": SEED + 24}))
+
+    cap = mixed_background(include_beacon_host=False)
+    entries.append(cap.write("15_mixed_background_no_http_host", True,
+        "Same composite DNS and timing as scenario 14, but beacon HTTP Host headers are removed.",
+        {"beacon_events": 14, "background_http_requests": 28,
+         "dns_queries": 25, "beacon_dns_name": "beacon.example.test",
+         "beacon_dns_ttl_seconds": 600, "beacon_http_host": False,
+         "dns_matches_scenario": "14_mixed_background",
+         "seed": SEED + 24}))
+
+    def tls_correlation_case(name, dns_names, sni, seed, description):
+        cap = Capture(seed)
+        for index, qname in enumerate(dns_names):
+            cap.dns_exchange(1.0 + index, qname)
+        cap.tcp_exchange(10.0, CLIENT, BEACON_HOST, 443,
+                         tls_client_hello(sni), response=b"tls-server-flight")
+        parameters = {"dns_names": dns_names, "tls_sni": sni,
+                      "destination_ip": BEACON_HOST, "seed": seed}
+        entries.append(cap.write(name, False, description, parameters))
+
+    tls_correlation_case("16_tls_sni_matches_dns",
+        ["tls-match.example.test", "tls-shared.example.test"],
+        "tls-match.example.test", SEED + 25,
+        "TLS SNI matches one of two DNS names resolved to the same IP.")
+    tls_correlation_case("17_tls_without_sni",
+        ["tls-one.example.test", "tls-two.example.test"], None, SEED + 26,
+        "TLS ClientHello has no SNI while multiple DNS names share the destination IP.")
+    tls_correlation_case("18_tls_sni_without_dns", [],
+        "sni-only.example.test", SEED + 27,
+        "TLS SNI is visible but no DNS traffic for the client is present in the capture.")
+    tls_correlation_case("19_tls_sni_conflicts_with_dns",
+        ["dns-name.example.test"], "different-sni.example.test", SEED + 28,
+        "Observed TLS SNI differs from the only DNS name resolved to the destination IP.")
+
+    cap = Capture(SEED + 29)
+    cap.dns_exchange(1.0, "settings.example.test", ttl=5,
+        cname_chain=[("regional.example.test", 30),
+                     ("edge.example.test", 12)])
+    cap.tcp_exchange(2.0, CLIENT, BEACON_HOST, 443,
+                     tls_client_hello("settings.example.test"),
+                     response=b"tls-server-flight")
+    entries.append(cap.write("20_dns_cname_chain_to_tls_sni", False,
+        "CNAME-to-CNAME-to-A DNS answer is correlated with a matching TLS SNI using the shortest chain TTL.",
+        {"qname": "settings.example.test", "cname_chain": [
+            "regional.example.test", "edge.example.test"],
+         "final_ip": BEACON_HOST, "effective_ttl_seconds": 5,
+         "tls_sni": "settings.example.test", "seed": SEED + 29}))
 
     manifest = {
         "title": "Beacon Hunter production-like synthetic PCAP suite",

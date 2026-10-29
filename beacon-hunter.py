@@ -2,7 +2,9 @@ import sys
 import argparse
 import ipaddress
 import statistics
+from datetime import datetime, timezone
 from collections import defaultdict, Counter
+from urllib.parse import urlsplit
 
 try:
     from scapy.all import rdpcap, IP, IPv6, TCP, UDP, DNS
@@ -88,7 +90,7 @@ def auto_min_gap(timestamps):
 
 
 # Core analysis:  samples = list of (timestamp, payload_len)
-def analyze_beacon(samples, min_gap=None, threshold=0.55):
+def analyze_beacon(samples, min_gap=None, threshold=0.55, debug_events=False):
     if len(samples) < 4:
         return None
 
@@ -110,14 +112,21 @@ def analyze_beacon(samples, min_gap=None, threshold=0.55):
             groups[-1].append((ts, sz))
 
     n_events = len(groups)
+    event_details = [
+        {"start": group[0][0], "packets": group}
+        for group in groups
+    ]
     if n_events < 4:
-        return {
+        result = {
             'raw_packets': len(samples),
             'events': n_events,
             'min_gap': f"{min_gap} ({gap_src})",
             'note': 'not enough separate events',
             'is_beacon_suspect': False,
         }
+        if debug_events:
+            result['event_details'] = event_details
+        return result
 
     # timing signal
     event_starts = [g[0][0] for g in groups]
@@ -159,14 +168,14 @@ def analyze_beacon(samples, min_gap=None, threshold=0.55):
 
     ratio = score / max_possible if max_possible else 0.0
 
-    return {
+    result = {
         'raw_packets': len(samples),
         'events': n_events,
         'min_gap': f"{min_gap} ({gap_src})",
-        'mean_interval': round(mean, 2),
-        'stdev_interval': round(stdev, 2),
-        'timing_cv': round(cv, 3),
-        'jitter_pct': round(cv * 100, 1),
+        'mean_interval': round(mean, 4),
+        'stdev_interval': round(stdev, 4),
+        'timing_cv': round(cv, 6),
+        'jitter_pct': round(cv * 100, 4),
         'modal_pkt_size': modal_size if has_size else 'n/a',
         'modal_recurrence': round(recurrence, 2) if has_size else 'n/a',
         'breakdown': breakdown,
@@ -174,6 +183,9 @@ def analyze_beacon(samples, min_gap=None, threshold=0.55):
         'score_pct': round(ratio * 100, 1),
         'is_beacon_suspect': ratio >= threshold,
     }
+    if debug_events:
+        result['event_details'] = event_details
+    return result
 
 
 # Helpers
@@ -245,10 +257,20 @@ def valid_dns_qname(name):
 
 def dns_answer_records(dns):
     answers = []
-    rr = dns.an
-    for _ in range(int(dns.ancount or 0)):
-        if not hasattr(rr, "rrname"):
-            break
+    answer_count = int(dns.ancount or 0)
+    answer_section = dns.an
+    if isinstance(answer_section, (list, tuple)):
+        records = answer_section[:answer_count]
+    else:
+        records = []
+        rr = answer_section
+        for _ in range(answer_count):
+            if not hasattr(rr, "rrname"):
+                break
+            records.append(rr)
+            rr = rr.payload
+
+    for rr in records:
         rdata = getattr(rr, "rdata", "")
         answers.append({
             "name": dns_text(rr.rrname),
@@ -256,8 +278,38 @@ def dns_answer_records(dns):
             "value": dns_text(rdata) if isinstance(rdata, (bytes, str)) else str(rdata),
             "ttl": int(rr.ttl),
         })
-        rr = rr.payload
     return answers
+
+
+def dns_resolved_addresses(record):
+    """Follow answer-section CNAMEs and return final IPs with effective TTLs."""
+    by_owner = defaultdict(list)
+    for answer in record["answers"]:
+        owner = answer["name"].lower().rstrip(".")
+        by_owner[owner].append(answer)
+
+    resolved = set()
+
+    def follow(owner, ttl_chain, visited):
+        if owner in visited:
+            return
+        visited = visited | {owner}
+        for answer in by_owner.get(owner, []):
+            rr_type = answer["type"]
+            if rr_type in ("A", "AAAA"):
+                try:
+                    answer_ip = str(ipaddress.ip_address(answer["value"]))
+                except ValueError:
+                    continue
+                effective_ttl = min(ttl_chain + [answer["ttl"]])
+                resolved.add((answer_ip, effective_ttl))
+            elif rr_type == "CNAME":
+                target = answer["value"].lower().rstrip(".")
+                follow(target, ttl_chain + [answer["ttl"]], visited)
+
+    start_name = record["qname"].lower().rstrip(".")
+    follow(start_name, [], set())
+    return sorted(resolved)
 
 
 def print_dns_report(records, limit):
@@ -269,7 +321,7 @@ def print_dns_report(records, limit):
         "names": Counter(),
         "types": Counter(),
         "rcodes": Counter(),
-        "answers": defaultdict(set),
+        "answers": defaultdict(list),
         "name_rcodes": defaultdict(Counter),
         "latencies": [],
         "unanswered": 0,
@@ -288,9 +340,11 @@ def print_dns_report(records, limit):
         if record["latency_ms"] is not None:
             summary["latencies"].append(record["latency_ms"])
         for answer in record["answers"]:
-            summary["answers"][record["qname"]].add((answer["value"], answer["ttl"]))
+            item = (answer["type"], answer["value"], answer["ttl"])
+            if item not in summary["answers"][record["qname"]]:
+                summary["answers"][record["qname"]].append(item)
 
-    print("[*] DNS observations (context only; generic packet scoring still applies):\n")
+    print("[*] DNS observations (context only; excluded from generic scoring):\n")
     for (client, resolver), summary in summaries.items():
         types = ", ".join(f"{name}={count}" for name, count in summary["types"].most_common())
         rcodes = ", ".join(f"{name}={count}" for name, count in summary["rcodes"].most_common()) or "none"
@@ -307,14 +361,171 @@ def print_dns_report(records, limit):
             sample = next(r for r in records
                           if r["client"] == client and r["resolver"] == resolver
                           and r["qname"] == qname)
-            answers = sorted(summary["answers"].get(qname, set()))
-            answer_text = ", ".join(f"{value} ({ttl}s)" for value, ttl in answers[:3]) if answers else "-"
+            answers = summary["answers"].get(qname, [])
+            answer_text = ", ".join(
+                f"{rr_type} {value} ({ttl}s)"
+                for rr_type, value, ttl in answers[:3]
+            ) if answers else "-"
             name_rcodes = summary["name_rcodes"].get(qname, Counter())
             rcode_text = name_rcodes.most_common(1)[0][0] if name_rcodes else "no reply"
             print(f"      {qname:<42}{sample['qtype']:<8}{count:>7}  {rcode_text:<10}{answer_text}")
         if len(summary["names"]) > limit:
             print(f"      ... {len(summary['names']) - limit} more names (raise --top to show more)")
     print()
+
+
+def extract_http_request(payload):
+    """Return (host, request-target) from a plaintext HTTP request segment."""
+    lines = payload.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+    request_parts = lines[0].split(b" ", 2) if lines else []
+    if len(request_parts) != 3 or not request_parts[2].startswith(b"HTTP/"):
+        return None
+    host = None
+    for line in lines[1:]:
+        name, separator, value = line.partition(b":")
+        if separator and name.strip().lower() == b"host":
+            host_value = value.decode("ascii", errors="replace").strip()
+            host = urlsplit("//" + host_value).hostname
+            if host:
+                host = host.lower().rstrip(".")
+            break
+    if not host:
+        return None
+    target = request_parts[1].decode("ascii", errors="replace")
+    return host, target
+
+
+def extract_tls_sni(payload):
+    """Read a Server Name Indication from a complete TLS ClientHello record."""
+    if len(payload) < 9 or payload[0] != 22 or payload[5] != 1:
+        return None
+    record_end = 5 + int.from_bytes(payload[3:5], "big")
+    hello_len = int.from_bytes(payload[6:9], "big")
+    if len(payload) < record_end or hello_len + 4 > record_end - 5:
+        return None
+    hello_end = 9 + hello_len
+    body = payload[9:hello_end]
+    try:
+        pos = 34  # legacy_version and random
+        session_len = body[pos]
+        pos += 1 + session_len
+        cipher_len = int.from_bytes(body[pos:pos + 2], "big")
+        pos += 2 + cipher_len
+        compression_len = body[pos]
+        pos += 1 + compression_len
+        extensions_len = int.from_bytes(body[pos:pos + 2], "big")
+        pos += 2
+        extensions_end = pos + extensions_len
+        if extensions_end > len(body):
+            return None
+        while pos + 4 <= extensions_end:
+            ext_type = int.from_bytes(body[pos:pos + 2], "big")
+            ext_len = int.from_bytes(body[pos + 2:pos + 4], "big")
+            if pos + 4 + ext_len > extensions_end:
+                return None
+            ext = body[pos + 4:pos + 4 + ext_len]
+            pos += 4 + ext_len
+            if ext_type != 0 or len(ext) < 5:
+                continue
+            names_end = 2 + int.from_bytes(ext[:2], "big")
+            if names_end > len(ext):
+                continue
+            name_pos = 2
+            while name_pos + 3 <= names_end:
+                name_type = ext[name_pos]
+                name_len = int.from_bytes(ext[name_pos + 1:name_pos + 3], "big")
+                name_pos += 3
+                name = ext[name_pos:name_pos + name_len]
+                name_pos += name_len
+                if name_type == 0 and name:
+                    return name.decode("ascii", errors="replace").strip().lower().rstrip(".")
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+def print_dns_connection_correlations(records, connections):
+    """Correlate a connection's start with DNS TTL and report evidence strength."""
+    answers_by_client_ip = defaultdict(list)
+    for record in records:
+        response_ts = record.get("response_ts")
+        if response_ts is None or record.get("rcode") != "NOERROR":
+            continue
+        for answer_ip, effective_ttl in dns_resolved_addresses(record):
+            answers_by_client_ip[(record["client"], answer_ip)].append({
+                "qname": record["qname"].lower().rstrip("."),
+                "start": response_ts,
+                "expires": response_ts + effective_ttl,
+                "ttl": effective_ttl,
+            })
+
+    rows = []
+    for connection in connections:
+        src, sport, dst, dport, proto = connection["tuple"]
+        observed_sni = sorted(connection["tls_snis"])
+        candidates = {
+            item["qname"]: item
+            for item in answers_by_client_ip.get((src, dst), [])
+            if item["start"] <= connection["start_ts"] <= item["expires"]
+        }
+        if not candidates and not observed_sni:
+            continue
+
+        http_matches = [
+            (host, target) for host, target in connection["http_requests"]
+            if host in candidates
+        ]
+        direct_http = sorted({host for host, _ in http_matches})
+        direct_sni = sorted(candidates.keys() & set(observed_sni))
+        if direct_http:
+            targets = sorted({target for host, target in http_matches if host in direct_http})
+            level = "CONFIRMED"
+            evidence = "HTTP_REQUEST_TARGET"
+            detail = f"Host={', '.join(direct_http)}; target={', '.join(targets[:3])}"
+        elif direct_sni:
+            level = "HIGH"
+            evidence, detail = "TLS_SNI_DNS_MATCH", "ClientHello SNI matches a DNS candidate resolved to this IP"
+        elif observed_sni and candidates:
+            level = "CONFLICT"
+            evidence = "TLS_SNI_DNS_CONFLICT"
+            detail = "SNI does not match any observed DNS candidate"
+        elif observed_sni:
+            level = "HIGH"
+            evidence, detail = "TLS_SNI_ONLY", "ClientHello SNI observed; no matching DNS answer was captured"
+        elif len(candidates) > 1:
+            level = "AMBIGUOUS"
+            evidence, detail = "DNS_IP_TIME_MATCH", "multiple DNS names match this client, IP, and connection-start window"
+        elif connection["start_kind"] == "TCP SYN":
+            level = "MEDIUM"
+            evidence, detail = "DNS_IP_TIME_UNIQUE", "one DNS name matches the observed TCP SYN"
+        else:
+            level = "LOW"
+            evidence, detail = "DNS_IP_TIME_FIRST_OBSERVED", "DNS name matches, but the connection start was not captured"
+
+        started = datetime.fromtimestamp(connection["start_ts"], timezone.utc).isoformat(timespec="milliseconds")
+        tuple_text = f"{src}:{sport} -> {dst}:{dport}/{proto}"
+        rows.append((started, level, tuple_text, sorted(candidates), observed_sni,
+                     evidence, detail,
+                     connection["start_kind"]))
+
+    if not rows:
+        return
+
+    print("[*] DNS-to-connection correlations (evidence-based):\n")
+    for started, level, tuple_text, candidates, observed_sni, evidence, detail, start_kind in sorted(rows):
+        print(f"  Flow: {tuple_text}")
+        print(f"    Started: {started} UTC ({start_kind})")
+        if candidates:
+            print("    DNS candidates:")
+            for name in candidates:
+                print(f"      {name}")
+        else:
+            print("    DNS candidates: none observed")
+        if observed_sni:
+            print(f"    Observed SNI: {', '.join(observed_sni)}")
+        print(f"    Attribution: {level}")
+        print(f"    Evidence: {evidence} ({detail})")
+    print("    TTL is checked at connection start; an established connection remains associated after TTL expiry.\n")
 
 
 # Main
@@ -331,15 +542,22 @@ def main():
                     help="how many candidates to show (default 15)")
     ap.add_argument("--include-internal", action="store_true",
                     help="also include internal IPs (needed for lab / RFC1918 C2)")
+    ap.add_argument("--debug-events", action="store_true",
+                    help="show which packet timestamps and payload sizes form each event")
     args = ap.parse_args()
 
     print(f"[*] Reading: {args.pcap}")
     packets = rdpcap(args.pcap)
     print(f"[*] Total packets: {len(packets)}\n")
+    capture_start = min((float(pkt.time) for pkt in packets), default=0.0)
 
-    # Source ports are omitted because clients commonly choose a new
-    # ephemeral source port for each TCP connection.
-    samples_by_flow = defaultdict(list)
+    # Beacon timing uses payload-bearing packets by default. Keep zero-payload
+    # TCP control packets and connection attempts in separate diagnostic series.
+    application_samples_by_flow = defaultdict(list)
+    control_packets_by_flow = defaultdict(list)
+    syn_samples_by_flow = defaultdict(list)
+    connections = []
+    active_connections = {}
     flow_counter = Counter()
     dns_records = []
     dns_pending = defaultdict(list)
@@ -349,7 +567,8 @@ def main():
         if ip is None:
             continue
 
-        if pkt.haslayer(DNS) and (pkt.haslayer(TCP) or pkt.haslayer(UDP)):
+        is_dns_transport = pkt.haslayer(DNS) and (pkt.haslayer(TCP) or pkt.haslayer(UDP))
+        if is_dns_transport:
             dns = pkt[DNS]
             if pkt.haslayer(TCP):
                 dns_proto = "TCP"
@@ -372,6 +591,7 @@ def main():
                         "rcode": None,
                         "answers": [],
                         "latency_ms": None,
+                        "response_ts": None,
                     }
                     dns_records.append(record)
                     query_key = (dns_proto, ip.src, ip.dst, sport, dport, dns_id)
@@ -385,6 +605,11 @@ def main():
                     record["rcode"] = DNS_RCODES.get(rcode_num, str(rcode_num))
                     record["answers"] = dns_answer_records(dns)
                     record["latency_ms"] = round((float(pkt.time) - record["ts"]) * 1000, 2)
+                    record["response_ts"] = float(pkt.time)
+
+            # DNS has its own context report above. Do not feed recognized DNS
+            # packets into the generic timing and payload-size beacon score.
+            continue
 
         dst = ip.dst
 
@@ -394,23 +619,85 @@ def main():
         if pkt.haslayer(TCP):
             proto = "TCP"
             dst_port = int(pkt[TCP].dport)
+            src_port = int(pkt[TCP].sport)
         elif pkt.haslayer(UDP):
             proto = "UDP"
             dst_port = int(pkt[UDP].dport)
+            src_port = int(pkt[UDP].sport)
         else:
             continue
 
-        if args.syn_only:
-            if proto != "TCP":
-                continue
-            if not (pkt[TCP].flags & 0x02) or (pkt[TCP].flags & 0x10):
-                continue
+        ts = float(pkt.time)
+        connection_tuple = (ip.src, src_port, dst, dst_port, proto)
+        if proto == "TCP":
+            flags = int(pkt[TCP].flags)
+            starts_connection = bool(flags & 0x02) and not bool(flags & 0x10)
+            tcp_payload = bytes(pkt[TCP].payload)
+            current = active_connections.get(connection_tuple)
+            if starts_connection and current is None:
+                current = {
+                    "tuple": connection_tuple,
+                    "start_ts": ts,
+                    "start_kind": "TCP SYN",
+                    "http_requests": set(),
+                    "tls_snis": set(),
+                }
+                connections.append(current)
+                active_connections[connection_tuple] = current
+            elif current is None:
+                current = {
+                    "tuple": connection_tuple,
+                    "start_ts": ts,
+                    "start_kind": "first observed packet",
+                    "http_requests": set(),
+                    "tls_snis": set(),
+                }
+                connections.append(current)
+                active_connections[connection_tuple] = current
+
+            http_request = extract_http_request(tcp_payload)
+            if http_request:
+                current["http_requests"].add(http_request)
+            tls_sni = extract_tls_sni(tcp_payload)
+            if tls_sni:
+                current["tls_snis"].add(tls_sni)
+            if flags & (0x01 | 0x04):  # FIN or RST closes this observed TCP tuple.
+                active_connections.pop(connection_tuple, None)
+        else:
+            current = active_connections.get(connection_tuple)
+            if current is None:
+                current = {
+                    "tuple": connection_tuple,
+                    "start_ts": ts,
+                    "start_kind": "first UDP datagram",
+                    "http_requests": set(),
+                    "tls_snis": set(),
+                }
+                connections.append(current)
+                active_connections[connection_tuple] = current
 
         flow = (ip.src, dst, proto, dst_port)
+        payload_size = payload_len(pkt)
+        is_syn = (proto == "TCP" and bool(pkt[TCP].flags & 0x02)
+                  and not bool(pkt[TCP].flags & 0x10))
+
+        if is_syn:
+            syn_samples_by_flow[flow].append((ts, payload_size))
+        if proto == "TCP" and payload_size == 0 and not is_syn:
+            control_packets_by_flow[flow].append((ts, str(pkt[TCP].flags)))
+
+        if args.syn_only:
+            if not is_syn:
+                continue
+            flow_counter[flow] += 1
+            continue
+
         flow_counter[flow] += 1
-        samples_by_flow[flow].append((float(pkt.time), payload_len(pkt)))
+        if payload_size > 0:
+            application_samples_by_flow[flow].append((ts, payload_size))
 
     print_dns_report(dns_records, args.top)
+    print_dns_connection_correlations(dns_records, connections)
 
     if not flow_counter:
         print("[!] No candidates. Try --include-internal or check pcap direction.")
@@ -426,15 +713,28 @@ def main():
         print(f"    {label:<55}{c:>8}{infra_hint(dst)}")
     print()
 
-    print("[*] Beacon analysis (v2 scoring):\n")
+    analysis_mode = "TCP SYN attempts" if args.syn_only else "payload-bearing packets"
+    print(f"[*] Beacon analysis ({analysis_mode}; v2 scoring):\n")
     scored = []   # (flow, result, is_infra)
     for flow, _ in flow_counter.most_common(args.top):
         src, dst, proto, port = flow
         label = f"{src} -> {dst} ({proto}/{port})"
-        result = analyze_beacon(samples_by_flow[flow],
+        samples = (syn_samples_by_flow[flow] if args.syn_only
+                   else application_samples_by_flow[flow])
+        result = analyze_beacon(samples,
                                 min_gap=args.min_gap,
-                                threshold=args.threshold)
+                                threshold=args.threshold,
+                                debug_events=args.debug_events)
         if result is None:
+            if args.debug_events and control_packets_by_flow.get(flow):
+                control_times = ", ".join(
+                    f"{ts - capture_start:.6f}s/{flags}"
+                    for ts, flags in control_packets_by_flow[flow]
+                )
+                print(f"  [{label}] insufficient {analysis_mode} packets; "
+                      f"zero-payload TCP control packets are excluded from scoring")
+                print(f"      control packets ({len(control_packets_by_flow[flow])}): "
+                      f"{control_times}\n")
             continue
 
         is_infra = bool(infra_hint(dst))
@@ -444,8 +744,28 @@ def main():
             if k == 'breakdown':
                 parts = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
                 print(f"      {'breakdown':<16}: {parts}")
+            elif k == 'event_details':
+                continue
             else:
                 print(f"      {k:<16}: {v}")
+        if args.debug_events:
+            print("      event groups:")
+            for index, event in enumerate(result.get('event_details', []), start=1):
+                start_relative = event['start'] - capture_start
+                sizes = [size for _, size in event['packets']]
+                members = ", ".join(
+                    f"{ts - capture_start:.6f}s/{size}B"
+                    for ts, size in event['packets']
+                )
+                print(f"        Event {index:<3} start={start_relative:.6f}s "
+                      f"packets={len(sizes)} payload_sizes={sizes} members=[{members}]")
+            controls = control_packets_by_flow.get(flow, [])
+            if controls:
+                control_times = ", ".join(
+                    f"{ts - capture_start:.6f}s/{flags}" for ts, flags in controls
+                )
+                print(f"      excluded zero-payload TCP control packets ({len(controls)}): "
+                      f"{control_times}")
         print()
 
         if result.get('is_beacon_suspect'):
