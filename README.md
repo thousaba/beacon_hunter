@@ -49,6 +49,12 @@ python beacon-hunter.py capture.pcap --syn-only
 # Print the packets assigned to each generated event
 python beacon-hunter.py capture.pcap --debug-events
 
+# Save the structured report to CSV while keeping the terminal report
+python beacon-hunter.py capture.pcap --csv report.csv
+
+# Include bidirectional session counters in the CSV
+python beacon-hunter.py capture.pcap --show-sessions --csv report.csv
+
 # Inspect event grouping with a 0.7-second threshold
 python beacon-hunter.py capture.pcap --min-gap 0.7 --debug-events
 ```
@@ -59,9 +65,21 @@ python beacon-hunter.py capture.pcap --min-gap 0.7 --debug-events
 | `--include-internal` | off | Also include internal, loopback, link-local, multicast, and reserved destination addresses |
 | `--min-gap N` | auto | Event-separation threshold in seconds |
 | `--threshold R` | `0.55` | Flag when score ratio is at least `R` |
-| `--top N` | `15` | Analyze the N candidate groups with the most packets, not the N highest scores |
+| `--top N` | `15` | Limit displayed rows; all eligible flows are analyzed. Candidate flows sort by packets, beacon results show suspects first |
 | `--syn-only` | off | Keep TCP SYN packets without ACK; excludes UDP and established TCP packets |
 | `--debug-events` | off | Print each event's relative start time, packet count, payload sizes, and packet members |
+| `--show-sessions` | off | Include bidirectional TCP/UDP session counters in the terminal and CSV report |
+| `--csv FILE` | off | Write a structured beacon summary plus separate DNS and attribution CSVs; sessions/debug get their own files when requested |
+| `--no-color` | off | Disable ANSI colors in terminal output |
+
+The main CSV has one row per analyzed flow with separate source IP, destination IP,
+protocol, and destination port columns. Its score is out of 100 and timing
+variation is labeled CV %. The beacon rows sort by status, then score.
+`report_dns.csv` has a `dns_query_id` shared by every answer for one query.
+`report_attribution.csv` contains sessions with DNS or TLS SNI attribution evidence, with a stable `session_id` and separate endpoint columns. It is not a complete session inventory. `--show-sessions` adds
+`report_sessions.csv`; `--debug-events` adds `report_debug.csv`;
+routing shadows are written to `report_shadows.csv`.
+
 
 By default, beacon timing and payload-size scoring use only packets carrying
 application payload. Zero-payload TCP control packets are kept separately and
